@@ -21,6 +21,8 @@ type counters struct {
 var (
 	content     = []string{"sports", "entertainment", "business", "education"}
 	allCounters = make([]counters, len(content))
+	limit       = 10 // maximum 10 requests can be handled at a time
+	sem         = make(chan int, limit)
 )
 
 func initialize() {
@@ -79,7 +81,12 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func isAllowed() bool {
-	return true
+	select {
+	case sem <- 1:
+		return true
+	default:
+		return false
+	}
 }
 
 func uploadCounters() error {
@@ -125,6 +132,16 @@ func main() {
 				if err != nil {
 					panic(err)
 				}
+			}
+		}
+	}()
+
+	go func() {
+		release := time.Tick(1 * time.Second)
+		for {
+			select {
+			case <-release:
+				<-sem
 			}
 		}
 	}()
