@@ -7,28 +7,27 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type counters struct {
-	sync.Mutex
-	view    int
-	click   int
+	view    int64
+	click   int64
 	content string
 }
 
 var (
 	content     = []string{"sports", "entertainment", "business", "education"}
 	allCounters = make([]counters, len(content))
-	limit       = 10 // maximum 10 requests can be handled at a time
-	sem         = make(chan int, limit)
+
+	limit = 10 // maximum 10 requests can be handled at a time
+	sem   = make(chan int, limit)
 )
 
 func initialize() {
 	for i := 0; i < len(content); i++ {
 		allCounters[i] = counters{
-			Mutex:   sync.Mutex{},
 			view:    0,
 			click:   0,
 			content: content[i],
@@ -43,9 +42,7 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 func viewHandler(w http.ResponseWriter, r *http.Request) {
 	index := rand.Intn(len(content))
 
-	allCounters[index].Lock()
-	allCounters[index].view++
-	allCounters[index].Unlock()
+	atomic.AddInt64(&allCounters[index].view, 1)
 
 	err := processRequest(r)
 	if err != nil {
@@ -66,9 +63,7 @@ func processRequest(r *http.Request) error {
 }
 
 func processClick(index int) error {
-	allCounters[index].Lock()
-	allCounters[index].click++
-	allCounters[index].Unlock()
+	atomic.AddInt64(&allCounters[index].click, 1)
 
 	return nil
 }
@@ -90,15 +85,13 @@ func isAllowed() bool {
 }
 
 func uploadCounters() error {
-	out := make(chan counters, len(content))
+	out := make(chan counters)
 
 	for i := 0; i < len(content); i++ {
 		go func(i int) {
-			allCounters[i].Lock()
 			out <- allCounters[i]
-			allCounters[i].click = 0
-			allCounters[i].view = 0
-			allCounters[i].Unlock()
+			atomic.StoreInt64(&allCounters[i].view, 0)
+			atomic.StoreInt64(&allCounters[i].click, 0)
 		}(i)
 	}
 
@@ -108,9 +101,15 @@ func uploadCounters() error {
 			f, _ = os.Create("store.txt")
 		}
 		defer f.Close()
-		for c := range out {
-			d := c.content + ":" + time.Now().Format("2006-01-02 15:04:05") + " {views: " + strconv.Itoa(c.view) + ", clicks: " + strconv.Itoa(c.click) + "}"
-			fmt.Fprintln(f, d)
+		// use fan-in channels to persist data and add timeout to avoid deadlock
+		for {
+			select {
+			case o := <-out:
+				d := o.content + ":" + time.Now().Format("2006-01-02 15:04:05") + " {views: " + strconv.FormatInt(o.view, 10) + ", clicks: " + strconv.FormatInt(o.click, 10) + "}"
+				fmt.Fprintln(f, d)
+			case <-time.After(2 * time.Second):
+				return
+			}
 		}
 	}()
 
